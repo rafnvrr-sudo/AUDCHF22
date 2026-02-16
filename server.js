@@ -10,27 +10,26 @@ if (!API_KEY) {
   process.exit(1);
 }
 
-// ===== SMART RATE LIMITER =====
-// Twelve Data free tier: 8 API credits/minute, 800/day
-// Strategy: server polls on a fixed schedule, clients receive cached data instantly
-// Budget per minute: 3 calls for price, 1 for quote, 1 for candles = 5/min max
+// ===== RATE LIMITER =====
+// Twelve Data free: 8 credits/min, 800/day
+// Strategy: alternate price(P) and candles(C) every ~8s
+// Pattern per minute: P C P C P C P = 7 calls/min, 1 margin
+// Analysis runs on every candle update = every ~16s
 
 const state = {
   price: null,
   quote: null,
-  candles: {},       // keyed by interval
+  candles: {},
   lastPrice: 0,
   lastQuote: 0,
-  lastCandles: {},   // keyed by interval
-  apiCalls: [],      // timestamps of API calls for rate tracking
-  errors: []
+  lastCandles: {},
+  lastUpdate: 0,
+  apiCalls: []
 };
 
 function canCallAPI() {
   const now = Date.now();
-  // Remove calls older than 60s
   state.apiCalls = state.apiCalls.filter(t => now - t < 60000);
-  // Keep 1 credit margin for safety
   return state.apiCalls.length < 7;
 }
 
@@ -40,7 +39,7 @@ function trackCall() {
 
 async function safeFetch(url, label) {
   if (!canCallAPI()) {
-    console.log(`[RATE] Skipping ${label} (${state.apiCalls.length}/8 used this minute)`);
+    console.log(`[RATE] Skip ${label} (${state.apiCalls.length}/8 this min)`);
     return null;
   }
   try {
@@ -48,25 +47,15 @@ async function safeFetch(url, label) {
     const res = await fetch(url, { timeout: 10000 });
     const data = await res.json();
     if (data.status === "error") {
-      console.error(`[API ERROR] ${label}: ${data.message}`);
-      if (data.message && data.message.includes("credits")) {
-        // Rate limited by API, pause for remaining minute
-        console.log("[RATE] API rate limit hit, backing off");
-      }
+      console.error(`[API] ${label}: ${data.message}`);
       return null;
     }
     return data;
   } catch (err) {
-    console.error(`[FETCH ERROR] ${label}: ${err.message}`);
+    console.error(`[ERR] ${label}: ${err.message}`);
     return null;
   }
 }
-
-// ===== SERVER-SIDE POLLING =====
-// Price: every 20s (3 calls/min)
-// Quote: every 60s (1 call/min)  
-// Candles: every 90s for active timeframe (< 1 call/min)
-// Total: ~5 calls/min, well under 8 limit
 
 let activeTimeframe = "1min";
 const sseClients = new Set();
@@ -79,19 +68,8 @@ async function pollPrice() {
   if (data && data.price) {
     state.price = data;
     state.lastPrice = Date.now();
+    state.lastUpdate = Date.now();
     broadcast({ type: "price", data, ts: state.lastPrice });
-  }
-}
-
-async function pollQuote() {
-  const data = await safeFetch(
-    `https://api.twelvedata.com/quote?symbol=AUD/CHF&apikey=${API_KEY}`,
-    "quote"
-  );
-  if (data && data.high) {
-    state.quote = data;
-    state.lastQuote = Date.now();
-    broadcast({ type: "quote", data, ts: state.lastQuote });
   }
 }
 
@@ -103,6 +81,19 @@ async function pollCandles(interval) {
   if (data && data.values) {
     state.candles[interval] = data;
     state.lastCandles[interval] = Date.now();
+    state.lastUpdate = Date.now();
+    // Extract quote from latest candle
+    const latest = data.values[0];
+    if (latest) {
+      const dayCandles = data.values.slice(0, 60);
+      state.quote = {
+        high: Math.max(...dayCandles.map(v => +v.high)),
+        low: Math.min(...dayCandles.map(v => +v.low)),
+        open: +dayCandles[dayCandles.length - 1].open
+      };
+      state.lastQuote = Date.now();
+      broadcast({ type: "quote", data: state.quote, ts: state.lastQuote });
+    }
     broadcast({ type: "candles", interval, data, ts: state.lastCandles[interval] });
   }
 }
@@ -114,26 +105,29 @@ function broadcast(msg) {
   }
 }
 
-// Start polling loops
-let priceTimer, quoteTimer, candleTimer;
+// Alternating poll: P, C, P, C, P, C, P = 7 calls/min
+let tick = 0;
+let pollTimer;
 
 function startPolling() {
-  // Initial fetch
+  // Initial burst
   pollPrice();
-  setTimeout(() => pollQuote(), 2000);
-  setTimeout(() => pollCandles(activeTimeframe), 4000);
+  setTimeout(() => pollCandles(activeTimeframe), 3000);
 
-  // Price every 20s
-  priceTimer = setInterval(pollPrice, 20000);
-  // Quote every 60s
-  quoteTimer = setInterval(pollQuote, 60000);
-  // Candles every 90s
-  candleTimer = setInterval(() => pollCandles(activeTimeframe), 90000);
+  // Alternate every 8s
+  pollTimer = setInterval(() => {
+    tick++;
+    if (tick % 2 === 0) {
+      pollCandles(activeTimeframe);
+    } else {
+      pollPrice();
+    }
+  }, 8500);
 
-  console.log("[POLL] Server-side polling started (price:20s, quote:60s, candles:90s)");
+  console.log("[POLL] Started: price/candles alternating every 8.5s = ~7 calls/min");
 }
 
-// ===== SSE ENDPOINT =====
+// ===== SSE =====
 app.get("/api/stream", (req, res) => {
   res.writeHead(200, {
     "Content-Type": "text/event-stream",
@@ -141,50 +135,30 @@ app.get("/api/stream", (req, res) => {
     Connection: "keep-alive",
     "Access-Control-Allow-Origin": "*"
   });
-
   sseClients.add(res);
-  console.log(`[SSE] Client connected (${sseClients.size} total)`);
 
-  // Send current state immediately
-  if (state.price) {
-    res.write(`data: ${JSON.stringify({ type: "price", data: state.price, ts: state.lastPrice })}\n\n`);
-  }
-  if (state.quote) {
-    res.write(`data: ${JSON.stringify({ type: "quote", data: state.quote, ts: state.lastQuote })}\n\n`);
-  }
-  if (state.candles[activeTimeframe]) {
-    res.write(`data: ${JSON.stringify({ type: "candles", interval: activeTimeframe, data: state.candles[activeTimeframe], ts: state.lastCandles[activeTimeframe] })}\n\n`);
-  }
+  if (state.price) res.write(`data: ${JSON.stringify({ type: "price", data: state.price, ts: state.lastPrice })}\n\n`);
+  if (state.quote) res.write(`data: ${JSON.stringify({ type: "quote", data: state.quote, ts: state.lastQuote })}\n\n`);
+  if (state.candles[activeTimeframe]) res.write(`data: ${JSON.stringify({ type: "candles", interval: activeTimeframe, data: state.candles[activeTimeframe], ts: state.lastCandles[activeTimeframe] })}\n\n`);
 
-  // Heartbeat every 30s to keep connection alive
   const hb = setInterval(() => {
-    try { res.write(": heartbeat\n\n"); } catch (e) { clearInterval(hb); }
-  }, 30000);
+    try { res.write(": hb\n\n"); } catch (e) { clearInterval(hb); }
+  }, 25000);
 
-  req.on("close", () => {
-    sseClients.delete(res);
-    clearInterval(hb);
-    console.log(`[SSE] Client disconnected (${sseClients.size} remaining)`);
-  });
+  req.on("close", () => { sseClients.delete(res); clearInterval(hb); });
 });
 
-// ===== REST ENDPOINTS (fallback + timeframe switch) =====
+// ===== REST =====
 app.use(express.static(path.join(__dirname, "public")));
 
-app.get("/api/price", (req, res) => {
-  res.json(state.price || { error: "No data yet" });
-});
-
-app.get("/api/quote", (req, res) => {
-  res.json(state.quote || { error: "No data yet" });
-});
+app.get("/api/price", (req, res) => res.json(state.price || { error: "Loading" }));
+app.get("/api/quote", (req, res) => res.json(state.quote || { error: "Loading" }));
 
 app.get("/api/candles", (req, res) => {
   const tf = req.query.interval || "1min";
-  // If new timeframe requested, switch active and fetch
   if (tf !== activeTimeframe) {
     activeTimeframe = tf;
-    if (!state.candles[tf] || Date.now() - (state.lastCandles[tf] || 0) > 30000) {
+    if (!state.candles[tf] || Date.now() - (state.lastCandles[tf] || 0) > 15000) {
       pollCandles(tf);
     }
   }
@@ -193,24 +167,18 @@ app.get("/api/candles", (req, res) => {
 
 app.get("/api/status", (req, res) => {
   const now = Date.now();
-  const callsThisMinute = state.apiCalls.filter(t => now - t < 60000).length;
   res.json({
-    status: "ok",
-    apiCallsThisMinute: callsThisMinute,
-    maxPerMinute: 8,
+    calls: state.apiCalls.filter(t => now - t < 60000).length,
+    max: 8,
     clients: sseClients.size,
-    activeTimeframe,
-    hasPrice: !!state.price,
-    hasQuote: !!state.quote,
-    hasCandles: !!state.candles[activeTimeframe],
-    lastPrice: state.lastPrice ? new Date(state.lastPrice).toISOString() : null,
-    lastQuote: state.lastQuote ? new Date(state.lastQuote).toISOString() : null
+    tf: activeTimeframe,
+    lastUpdate: state.lastUpdate ? new Date(state.lastUpdate).toISOString() : null
   });
 });
 
 app.get("/health", (req, res) => res.json({ status: "ok" }));
 
 app.listen(PORT, () => {
-  console.log(`AUD/CHF Predictor running on port ${PORT}`);
+  console.log(`AUD/CHF Predictor on port ${PORT}`);
   startPolling();
 });
