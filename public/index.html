@@ -60,7 +60,7 @@ body { background: var(--bg); color: var(--txt); font-family: var(--font); min-h
 
 /* Chart */
 .chart-wrap { border-radius: 6px; overflow: hidden; margin-bottom: 20px; border: 1px solid var(--brd); animation: enter .4s ease .1s both; }
-#chart { width: 100%; height: 240px; display: block; }
+#chart { width: 100%; height: 320px; display: block; }
 
 /* Error */
 .error { font-family: var(--mono); font-size: 10px; color: var(--red); background: var(--redbg); border: 1px solid rgba(212,93,93,.15); border-radius: 4px; padding: 8px 12px; margin-bottom: 12px; display: none; }
@@ -149,6 +149,7 @@ body { background: var(--bg); color: var(--txt); font-family: var(--font); min-h
     <div class="stat"><div class="stat-label">OPEN</div><div class="stat-val" id="sOpen">...</div></div>
     <div class="stat"><div class="stat-label">TICKS</div><div class="stat-val" id="sTicks" style="color:var(--blue)">0</div></div>
     <div class="stat"><div class="stat-label">SOURCE</div><div class="stat-val" id="sSource" style="color:var(--gold)">...</div></div>
+    <div class="stat"><div class="stat-label">MAJ</div><div class="stat-val" id="sLastUpdate" style="color:var(--blue)">--:--:--</div></div>
   </div>
 
   <!-- Controls -->
@@ -276,20 +277,30 @@ const sigColor=s=>s==="BUY"?"var(--green)":s==="SELL"?"var(--red)":s==="INFO"?"v
 const sigBg=s=>s==="BUY"?"var(--greenbg)":s==="SELL"?"var(--redbg)":s==="INFO"?"rgba(122,158,194,.1)":"rgba(255,255,255,.03)";
 
 // ===== SSE STREAM =====
+function updateTimestamp(){$("sLastUpdate").textContent=new Date().toLocaleTimeString("fr-FR",{hour:"2-digit",minute:"2-digit",second:"2-digit"})}
+
 function connectSSE(){
   if(eventSource){eventSource.close()}
   eventSource=new EventSource("/api/stream");
   eventSource.onopen=()=>{
     $("sSource").textContent="TWELVE DATA";$("sSource").style.color="var(--green)";
     $("liveDot").style.background="var(--green)";$("liveDot").style.animation="glow 2s infinite";
-    $("statusText").textContent="LIVE · SSE";hideError();
+    $("statusText").textContent="LIVE · 8s";hideError();
   };
   eventSource.onmessage=(e)=>{
     if(paused)return;
     try{
       const msg=JSON.parse(e.data);
       if(msg.type==="price"&&msg.data.price){
-        prevPrice=livePrice||+msg.data.price;livePrice=+msg.data.price;tickCount++;updatePrice();
+        prevPrice=livePrice||+msg.data.price;livePrice=+msg.data.price;tickCount++;updatePrice();updateTimestamp();
+        if(candles.length>0){
+          const last=candles[candles.length-1];
+          last.c=livePrice;
+          if(livePrice>last.h)last.h=livePrice;
+          if(livePrice<last.l)last.l=livePrice;
+          prediction=analyze(candles);
+          renderPrediction();renderChart();renderSignals();renderLevels();
+        }
       }
       if(msg.type==="quote"&&msg.data){
         if(msg.data.high)$("sHigh").textContent=(+msg.data.high).toFixed(5);
@@ -297,14 +308,13 @@ function connectSSE(){
         if(msg.data.open)$("sOpen").textContent=(+msg.data.open).toFixed(5);
       }
       if(msg.type==="candles"&&msg.data.values&&msg.interval===currentTF){
-        processCandles(msg.data);
+        processCandles(msg.data);updateTimestamp();
       }
     }catch(err){}
   };
   eventSource.onerror=()=>{
     $("sSource").textContent="RECONNEXION...";$("sSource").style.color="var(--gold)";
     $("liveDot").style.background="var(--gold)";
-    // EventSource auto-reconnects
   };
 }
 
@@ -394,14 +404,14 @@ function renderChart(){
   cv.width=r.width*dpr;cv.height=r.height*dpr;
   const ctx=cv.getContext("2d");ctx.scale(dpr,dpr);
   const w=r.width,h=r.height;
-  ctx.fillStyle="#141210";ctx.fillRect(0,0,w,h);
+  ctx.fillStyle="#131722";ctx.fillRect(0,0,w,h);
   const disp=candles.slice(-55);const allP=disp.flatMap(x=>[x.h,x.l]);
   let minP=Math.min(...allP),maxP=Math.max(...allP);const rng=(maxP-minP)||.001;
   minP-=rng*.04;maxP+=rng*.04;const tR=maxP-minP;
   const pad={t:8,b:8,l:4,r:52};const cw=(w-pad.l-pad.r)/disp.length;
   const toY=p=>pad.t+(1-(p-minP)/tR)*(h-pad.t-pad.b);
   // Grid
-  for(let i=0;i<=4;i++){const y=pad.t+(i/4)*(h-pad.t-pad.b);ctx.strokeStyle="rgba(255,255,255,.03)";ctx.lineWidth=.5;ctx.beginPath();ctx.moveTo(pad.l,y);ctx.lineTo(w-pad.r,y);ctx.stroke();ctx.fillStyle="rgba(255,255,255,.12)";ctx.font="9px monospace";ctx.textAlign="left";ctx.fillText((maxP-(i/4)*tR).toFixed(5),w-pad.r+3,y+3)}
+  for(let i=0;i<=4;i++){const y=pad.t+(i/4)*(h-pad.t-pad.b);ctx.strokeStyle="rgba(42,46,57,.8)";ctx.lineWidth=.5;ctx.beginPath();ctx.moveTo(pad.l,y);ctx.lineTo(w-pad.r,y);ctx.stroke();ctx.fillStyle="rgba(209,212,220,.35)";ctx.font="9px monospace";ctx.textAlign="left";ctx.fillText((maxP-(i/4)*tR).toFixed(5),w-pad.r+3,y+3)}
   // BB
   const cls=disp.map(x=>x.c);
   if(cls.length>=20){ctx.beginPath();for(let i=19;i<cls.length;i++){const b=BB(cls.slice(0,i+1));if(!b)continue;const x=pad.l+i*cw+cw/2;i===19?ctx.moveTo(x,toY(b.u)):ctx.lineTo(x,toY(b.u))}for(let i=cls.length-1;i>=19;i--){const b=BB(cls.slice(0,i+1));if(!b)continue;ctx.lineTo(pad.l+i*cw+cw/2,toY(b.l))}ctx.closePath();ctx.fillStyle="rgba(212,180,120,.04)";ctx.fill()}
@@ -409,16 +419,31 @@ function renderChart(){
   ctx.beginPath();ctx.strokeStyle="rgba(212,180,120,.4)";ctx.lineWidth=1.2;let st=false;for(let i=8;i<cls.length;i++){const e=EMA(cls.slice(0,i+1),9);if(!e)continue;const x=pad.l+i*cw+cw/2;!st?(ctx.moveTo(x,toY(e)),st=true):ctx.lineTo(x,toY(e))}ctx.stroke();
   // S/R
   if(prediction?.levels){prediction.levels.slice(0,3).forEach(lv=>{if(lv.p>=minP&&lv.p<=maxP){const y=toY(lv.p);ctx.setLineDash([3,6]);ctx.strokeStyle=lv.t==="S"?"rgba(93,170,104,.3)":"rgba(212,93,93,.3)";ctx.lineWidth=1;ctx.beginPath();ctx.moveTo(pad.l,y);ctx.lineTo(w-pad.r,y);ctx.stroke();ctx.setLineDash([])}})}
-  // Candles
-  disp.forEach((x,i)=>{const cx=pad.l+i*cw+cw/2;const bull=x.c>=x.o;ctx.globalAlpha=i>=disp.length-3?1:.6;const gc="#5daa68",rc="#d45d5d";ctx.strokeStyle=bull?gc:rc;ctx.lineWidth=1;ctx.beginPath();ctx.moveTo(cx,toY(x.h));ctx.lineTo(cx,toY(x.l));ctx.stroke();const top=toY(Math.max(x.o,x.c)),bot=toY(Math.min(x.o,x.c));if(bull)ctx.strokeRect(cx-cw*.32,top,cw*.64,Math.max(bot-top,1));else{ctx.fillStyle=rc;ctx.fillRect(cx-cw*.32,top,cw*.64,Math.max(bot-top,1))}ctx.globalAlpha=1});
+  // Candles - xStation 5 style
+  const gap=Math.max(1,cw*0.18);const bw=cw-gap*2;
+  disp.forEach((x,i)=>{
+    const cx=pad.l+i*cw+cw/2;const bull=x.c>=x.o;
+    ctx.globalAlpha=i>=disp.length-3?1:.7;
+    const gc="#26a69a",rc="#ef5350"; // xStation green/red
+    const color=bull?gc:rc;
+    // Wick (thin centered line)
+    ctx.strokeStyle=color;ctx.lineWidth=1;
+    ctx.beginPath();ctx.moveTo(cx,toY(x.h));ctx.lineTo(cx,toY(x.l));ctx.stroke();
+    // Body (filled solid for both bull and bear)
+    const top=toY(Math.max(x.o,x.c)),bot=toY(Math.min(x.o,x.c));
+    const bodyH=Math.max(bot-top,1.5);
+    ctx.fillStyle=color;
+    ctx.fillRect(cx-bw/2,top,bw,bodyH);
+    ctx.globalAlpha=1;
+  });
   // Price line
-  const cp=livePrice||disp[disp.length-1].c;if(cp>=minP&&cp<=maxP){const cpy=toY(cp);ctx.setLineDash([1,3]);ctx.strokeStyle="rgba(212,180,120,.5)";ctx.lineWidth=1;ctx.beginPath();ctx.moveTo(pad.l,cpy);ctx.lineTo(w-pad.r,cpy);ctx.stroke();ctx.setLineDash([]);ctx.fillStyle="#5d4e37";ctx.fillRect(w-pad.r+1,cpy-7,50,14);ctx.fillStyle="#faf5ed";ctx.font="bold 9px monospace";ctx.textAlign="center";ctx.fillText(cp.toFixed(5),w-pad.r+26,cpy+3)}
+  const cp=livePrice||disp[disp.length-1].c;if(cp>=minP&&cp<=maxP){const cpy=toY(cp);const isUp=cp>=(disp[disp.length-1]?.o||cp);ctx.setLineDash([2,4]);ctx.strokeStyle=isUp?"rgba(38,166,154,.6)":"rgba(239,83,80,.6)";ctx.lineWidth=1;ctx.beginPath();ctx.moveTo(pad.l,cpy);ctx.lineTo(w-pad.r,cpy);ctx.stroke();ctx.setLineDash([]);ctx.fillStyle=isUp?"#26a69a":"#ef5350";ctx.fillRect(w-pad.r+1,cpy-8,50,16);ctx.fillStyle="#fff";ctx.font="bold 9px monospace";ctx.textAlign="center";ctx.fillText(cp.toFixed(5),w-pad.r+26,cpy+3)}
 }
 
 // ===== CONTROLS =====
 document.querySelectorAll(".tf-btn").forEach(btn=>{btn.addEventListener("click",()=>{document.querySelectorAll(".tf-btn").forEach(b=>b.classList.remove("active"));btn.classList.add("active");currentTF=btn.dataset.tf;fetchCandles()})});
 document.querySelectorAll(".tab").forEach(t=>{t.addEventListener("click",()=>{document.querySelectorAll(".tab").forEach(x=>x.classList.remove("active"));document.querySelectorAll(".tab-content").forEach(x=>x.classList.remove("active"));t.classList.add("active");document.getElementById("tab-"+t.dataset.tab).classList.add("active")})});
-$("pauseBtn").addEventListener("click",()=>{paused=!paused;const b=$("pauseBtn");if(paused){b.textContent="▶ PLAY";b.style.background="var(--redbg)";b.style.color="var(--red)";b.style.borderColor="rgba(212,93,93,.2)";$("liveDot").style.background="var(--red)";$("liveDot").style.animation="none";$("statusText").textContent="PAUSE"}else{b.textContent="● LIVE";b.style.background="var(--greenbg)";b.style.color="var(--green)";b.style.borderColor="rgba(93,170,104,.2)";$("liveDot").style.background="var(--green)";$("liveDot").style.animation="glow 2s infinite";$("statusText").textContent="LIVE · SSE"}});
+$("pauseBtn").addEventListener("click",()=>{paused=!paused;const b=$("pauseBtn");if(paused){b.textContent="▶ PLAY";b.style.background="var(--redbg)";b.style.color="var(--red)";b.style.borderColor="rgba(212,93,93,.2)";$("liveDot").style.background="var(--red)";$("liveDot").style.animation="none";$("statusText").textContent="PAUSE"}else{b.textContent="● LIVE";b.style.background="var(--greenbg)";b.style.color="var(--green)";b.style.borderColor="rgba(93,170,104,.2)";$("liveDot").style.background="var(--green)";$("liveDot").style.animation="glow 2s infinite";$("statusText").textContent="LIVE · 8s"}});
 $("refreshBtn").addEventListener("click",()=>{fetchCandles()});
 
 // ===== INIT =====
