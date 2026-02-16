@@ -1,0 +1,16 @@
+{
+  "name": "audchf-predictor",
+  "version": "2.0.0",
+  "description": "AUD/CHF Forex Predictor with real-time Twelve Data API",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "node-fetch": "^2.7.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
