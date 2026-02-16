@@ -10,11 +10,7 @@ if (!API_KEY) {
   process.exit(1);
 }
 
-// ===== RATE LIMITER =====
-// Twelve Data free: 8 credits/min, 800/day
-// Strategy: alternate price(P) and candles(C) every ~8s
-// Pattern per minute: P C P C P C P = 7 calls/min, 1 margin
-// Analysis runs on every candle update = every ~16s
+const ALL_TF = ["1min", "5min", "15min", "30min", "1h", "4h"];
 
 const state = {
   price: null,
@@ -33,28 +29,17 @@ function canCallAPI() {
   return state.apiCalls.length < 7;
 }
 
-function trackCall() {
-  state.apiCalls.push(Date.now());
-}
+function trackCall() { state.apiCalls.push(Date.now()); }
 
 async function safeFetch(url, label) {
-  if (!canCallAPI()) {
-    console.log(`[RATE] Skip ${label} (${state.apiCalls.length}/8 this min)`);
-    return null;
-  }
+  if (!canCallAPI()) return null;
   try {
     trackCall();
     const res = await fetch(url, { timeout: 10000 });
     const data = await res.json();
-    if (data.status === "error") {
-      console.error(`[API] ${label}: ${data.message}`);
-      return null;
-    }
+    if (data.status === "error") { console.error(`[API] ${label}: ${data.message}`); return null; }
     return data;
-  } catch (err) {
-    console.error(`[ERR] ${label}: ${err.message}`);
-    return null;
-  }
+  } catch (err) { console.error(`[ERR] ${label}: ${err.message}`); return null; }
 }
 
 let activeTimeframe = "1min";
@@ -62,8 +47,7 @@ const sseClients = new Set();
 
 async function pollPrice() {
   const data = await safeFetch(
-    `https://api.twelvedata.com/price?symbol=AUD/CHF&apikey=${API_KEY}`,
-    "price"
+    `https://api.twelvedata.com/price?symbol=AUD/CHF&apikey=${API_KEY}`, "price"
   );
   if (data && data.price) {
     state.price = data;
@@ -82,9 +66,7 @@ async function pollCandles(interval) {
     state.candles[interval] = data;
     state.lastCandles[interval] = Date.now();
     state.lastUpdate = Date.now();
-    // Extract quote from latest candle
-    const latest = data.values[0];
-    if (latest) {
+    if (interval === activeTimeframe) {
       const dayCandles = data.values.slice(0, 60);
       state.quote = {
         high: Math.max(...dayCandles.map(v => +v.high)),
@@ -105,26 +87,35 @@ function broadcast(msg) {
   }
 }
 
-// Alternating poll: P, C, P, C, P, C, P = 7 calls/min
+// Scheduler: P, C(active), P, C(active), P, C(bg), P = 7/min
 let tick = 0;
-let pollTimer;
+let bgTfIndex = 0;
+
+function getNextBgTf() {
+  const others = ALL_TF.filter(t => t !== activeTimeframe);
+  const tf = others[bgTfIndex % others.length];
+  bgTfIndex++;
+  return tf;
+}
 
 function startPolling() {
-  // Initial burst
   pollPrice();
   setTimeout(() => pollCandles(activeTimeframe), 3000);
 
-  // Alternate every 8s
-  pollTimer = setInterval(() => {
+  setInterval(() => {
     tick++;
-    if (tick % 2 === 0) {
-      pollCandles(activeTimeframe);
-    } else {
+    if (tick % 2 === 1) {
       pollPrice();
+    } else {
+      if (tick % 6 === 0) {
+        pollCandles(getNextBgTf());
+      } else {
+        pollCandles(activeTimeframe);
+      }
     }
   }, 8500);
 
-  console.log("[POLL] Started: price/candles alternating every 8.5s = ~7 calls/min");
+  console.log("[POLL] Started: price/candles/bg-TF cycling ~7 calls/min");
 }
 
 // ===== SSE =====
@@ -139,12 +130,15 @@ app.get("/api/stream", (req, res) => {
 
   if (state.price) res.write(`data: ${JSON.stringify({ type: "price", data: state.price, ts: state.lastPrice })}\n\n`);
   if (state.quote) res.write(`data: ${JSON.stringify({ type: "quote", data: state.quote, ts: state.lastQuote })}\n\n`);
-  if (state.candles[activeTimeframe]) res.write(`data: ${JSON.stringify({ type: "candles", interval: activeTimeframe, data: state.candles[activeTimeframe], ts: state.lastCandles[activeTimeframe] })}\n\n`);
+  for (const tf of ALL_TF) {
+    if (state.candles[tf]) {
+      res.write(`data: ${JSON.stringify({ type: "candles", interval: tf, data: state.candles[tf], ts: state.lastCandles[tf] })}\n\n`);
+    }
+  }
 
   const hb = setInterval(() => {
     try { res.write(": hb\n\n"); } catch (e) { clearInterval(hb); }
   }, 25000);
-
   req.on("close", () => { sseClients.delete(res); clearInterval(hb); });
 });
 
@@ -163,17 +157,6 @@ app.get("/api/candles", (req, res) => {
     }
   }
   res.json(state.candles[tf] || { error: "Loading..." });
-});
-
-app.get("/api/status", (req, res) => {
-  const now = Date.now();
-  res.json({
-    calls: state.apiCalls.filter(t => now - t < 60000).length,
-    max: 8,
-    clients: sseClients.size,
-    tf: activeTimeframe,
-    lastUpdate: state.lastUpdate ? new Date(state.lastUpdate).toISOString() : null
-  });
 });
 
 app.get("/health", (req, res) => res.json({ status: "ok" }));
