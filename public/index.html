@@ -268,34 +268,66 @@ function analyze(candles){
 
 // ===== STATE =====
 let candles=[], currentTF="1min", livePrice=0, prevPrice=0, tickCount=0, paused=false, prediction=null, history=[];
-let priceInterval, candleInterval;
+let eventSource=null;
 
 // ===== DOM =====
 const $=id=>document.getElementById(id);
 const sigColor=s=>s==="BUY"?"var(--green)":s==="SELL"?"var(--red)":s==="INFO"?"var(--blue)":"var(--dim)";
 const sigBg=s=>s==="BUY"?"var(--greenbg)":s==="SELL"?"var(--redbg)":s==="INFO"?"rgba(122,158,194,.1)":"rgba(255,255,255,.03)";
 
-// ===== API CALLS =====
-async function fetchPrice(){
-  try{const r=await fetch("/api/price");const d=await r.json();if(d.price){prevPrice=livePrice||+d.price;livePrice=+d.price;tickCount++;updatePrice();$("sSource").textContent="TWELVE DATA";$("sSource").style.color="var(--green)"}return true}catch(e){return false}}
+// ===== SSE STREAM =====
+function connectSSE(){
+  if(eventSource){eventSource.close()}
+  eventSource=new EventSource("/api/stream");
+  eventSource.onopen=()=>{
+    $("sSource").textContent="TWELVE DATA";$("sSource").style.color="var(--green)";
+    $("liveDot").style.background="var(--green)";$("liveDot").style.animation="glow 2s infinite";
+    $("statusText").textContent="LIVE · SSE";hideError();
+  };
+  eventSource.onmessage=(e)=>{
+    if(paused)return;
+    try{
+      const msg=JSON.parse(e.data);
+      if(msg.type==="price"&&msg.data.price){
+        prevPrice=livePrice||+msg.data.price;livePrice=+msg.data.price;tickCount++;updatePrice();
+      }
+      if(msg.type==="quote"&&msg.data){
+        if(msg.data.high)$("sHigh").textContent=(+msg.data.high).toFixed(5);
+        if(msg.data.low)$("sLow").textContent=(+msg.data.low).toFixed(5);
+        if(msg.data.open)$("sOpen").textContent=(+msg.data.open).toFixed(5);
+      }
+      if(msg.type==="candles"&&msg.data.values&&msg.interval===currentTF){
+        processCandles(msg.data);
+      }
+    }catch(err){}
+  };
+  eventSource.onerror=()=>{
+    $("sSource").textContent="RECONNEXION...";$("sSource").style.color="var(--gold)";
+    $("liveDot").style.background="var(--gold)";
+    // EventSource auto-reconnects
+  };
+}
 
-async function fetchQuote(){
-  try{const r=await fetch("/api/quote");const d=await r.json();if(d.high)$("sHigh").textContent=(+d.high).toFixed(5);if(d.low)$("sLow").textContent=(+d.low).toFixed(5);if(d.open)$("sOpen").textContent=(+d.open).toFixed(5)}catch(e){}}
+function processCandles(d){
+  if(!d.values)return;
+  candles=d.values.reverse().map(v=>({o:+v.open,h:+v.high,l:+v.low,c:+v.close,t:v.datetime}));
+  hideError();
+  prediction=analyze(candles);
+  renderPrediction();renderChart();renderSignals();renderLevels();
+}
 
+// Timeframe switch: fetch via REST then SSE takes over
 async function fetchCandles(){
   try{
     const r=await fetch(`/api/candles?interval=${currentTF}&size=100`);
     const d=await r.json();
-    if(d.status==="error"||!d.values){showError(d.message||"Erreur API");return false}
-    candles=d.values.reverse().map(v=>({o:+v.open,h:+v.high,l:+v.low,c:+v.close,t:v.datetime}));
-    hideError();
-    prediction=analyze(candles);
-    renderPrediction();
-    renderChart();
-    renderSignals();
-    renderLevels();
-    return true;
-  }catch(e){showError(e.message);return false}}
+    if(d.status==="error"||!d.values){
+      if(d.error==="Loading..."){setTimeout(fetchCandles,2000);return false}
+      showError(d.message||"Erreur API");return false;
+    }
+    processCandles(d);return true;
+  }catch(e){showError(e.message);return false}
+}
 
 function showError(msg){const b=$("errorBox");b.textContent=msg;b.style.display="block"}
 function hideError(){$("errorBox").style.display="none"}
@@ -386,19 +418,14 @@ function renderChart(){
 // ===== CONTROLS =====
 document.querySelectorAll(".tf-btn").forEach(btn=>{btn.addEventListener("click",()=>{document.querySelectorAll(".tf-btn").forEach(b=>b.classList.remove("active"));btn.classList.add("active");currentTF=btn.dataset.tf;fetchCandles()})});
 document.querySelectorAll(".tab").forEach(t=>{t.addEventListener("click",()=>{document.querySelectorAll(".tab").forEach(x=>x.classList.remove("active"));document.querySelectorAll(".tab-content").forEach(x=>x.classList.remove("active"));t.classList.add("active");document.getElementById("tab-"+t.dataset.tab).classList.add("active")})});
-$("pauseBtn").addEventListener("click",()=>{paused=!paused;const b=$("pauseBtn");if(paused){b.textContent="▶ PLAY";b.style.background="var(--redbg)";b.style.color="var(--red)";b.style.borderColor="rgba(212,93,93,.2)";$("liveDot").style.background="var(--red)";$("liveDot").style.animation="none";$("statusText").textContent="PAUSE";stopPolling()}else{b.textContent="● LIVE";b.style.background="var(--greenbg)";b.style.color="var(--green)";b.style.borderColor="rgba(93,170,104,.2)";$("liveDot").style.background="var(--green)";$("liveDot").style.animation="glow 2s infinite";$("statusText").textContent="LIVE · 8s";startPolling()}});
-$("refreshBtn").addEventListener("click",()=>{fetchCandles();fetchPrice();fetchQuote()});
-
-function startPolling(){priceInterval=setInterval(()=>{fetchPrice()},8000);candleInterval=setInterval(()=>{fetchCandles();fetchQuote()},60000)}
-function stopPolling(){clearInterval(priceInterval);clearInterval(candleInterval)}
+$("pauseBtn").addEventListener("click",()=>{paused=!paused;const b=$("pauseBtn");if(paused){b.textContent="▶ PLAY";b.style.background="var(--redbg)";b.style.color="var(--red)";b.style.borderColor="rgba(212,93,93,.2)";$("liveDot").style.background="var(--red)";$("liveDot").style.animation="none";$("statusText").textContent="PAUSE"}else{b.textContent="● LIVE";b.style.background="var(--greenbg)";b.style.color="var(--green)";b.style.borderColor="rgba(93,170,104,.2)";$("liveDot").style.background="var(--green)";$("liveDot").style.animation="glow 2s infinite";$("statusText").textContent="LIVE · SSE"}});
+$("refreshBtn").addEventListener("click",()=>{fetchCandles()});
 
 // ===== INIT =====
 async function init(){
-  const ok=await fetchCandles();
-  await fetchPrice();
-  await fetchQuote();
-  if(ok)startPolling();
-  else{$("sSource").textContent="ERREUR";$("sSource").style.color="var(--red)"}
+  connectSSE();
+  // Also fetch candles via REST for immediate display
+  await fetchCandles();
 }
 init();
 window.addEventListener("resize",renderChart);
