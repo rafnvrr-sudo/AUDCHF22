@@ -111,6 +111,20 @@ body { background: var(--bg); color: var(--txt); font-family: var(--font); min-h
 .hist-row { display: grid; grid-template-columns: 75px 95px 45px 1fr; padding: 8px 2px; border-bottom: 1px solid rgba(255,255,255,.015); font-size: 11px; align-items: center; }
 .hist-scroll { max-height: 300px; overflow-y: auto; }
 
+/* Multi-TF Consensus */
+.mtf-box { background: var(--card); border: 1px solid var(--brd); border-radius: 6px; padding: 16px 20px; margin-bottom: 20px; animation: enter .4s ease .18s both; }
+.mtf-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 12px; }
+.mtf-title { font-family: var(--mono); font-size: 9px; color: var(--dim); letter-spacing: 3px; }
+.mtf-verdict { font-family: var(--mono); font-size: 13px; font-weight: 600; padding: 3px 12px; border-radius: 3px; }
+.mtf-grid { }
+.mtf-row { display: grid; grid-template-columns: 50px 80px 50px 55px 55px; padding: 7px 0; border-bottom: 1px solid rgba(255,255,255,.02); align-items: center; font-family: var(--mono); font-size: 10px; }
+.mtf-row-header { color: var(--dimmer); font-size: 8px; letter-spacing: 1px; border-bottom: 1px solid rgba(255,255,255,.04); padding-bottom: 6px; margin-bottom: 2px; }
+.mtf-row .tf-label { color: var(--dim); font-weight: 600; }
+.mtf-row .sig-dir { font-weight: 600; }
+.mtf-loading { color: var(--dimmer); font-style: italic; font-size: 9px; }
+.mtf-summary { margin-top: 12px; padding-top: 10px; border-top: 1px solid rgba(255,255,255,.04); font-family: var(--mono); font-size: 10px; color: var(--dim); line-height: 1.6; }
+.mtf-sure { font-size: 16px; font-weight: 700; }
+
 .tab-content { display: none; animation: enter .25s ease; }
 .tab-content.active { display: block; }
 
@@ -197,6 +211,20 @@ body { background: var(--bg); color: var(--txt); font-family: var(--font); min-h
     <div id="patternTag" style="display:none"></div>
   </div>
 
+  <!-- Multi-TF Consensus -->
+  <div class="mtf-box" id="mtfBox">
+    <div class="mtf-header">
+      <div class="mtf-title">CONSENSUS MULTI-TIMEFRAME</div>
+      <div class="mtf-verdict" id="mtfVerdict">EN ATTENTE...</div>
+    </div>
+    <div class="mtf-grid" id="mtfGrid">
+      <div class="mtf-row mtf-row-header">
+        <span>TF</span><span>SIGNAL</span><span>CONF</span><span>RSI</span><span>MACD</span>
+      </div>
+    </div>
+    <div class="mtf-summary" id="mtfSummary"></div>
+  </div>
+
   <!-- XTB Setup -->
   <div class="setup-box" id="setupBox" style="display:none">
     <div class="setup-header">
@@ -270,6 +298,9 @@ function analyze(candles){
 // ===== STATE =====
 let candles=[], currentTF="1min", livePrice=0, prevPrice=0, tickCount=0, paused=false, prediction=null, history=[];
 let eventSource=null;
+const allTfCandles={};  // {tf: [candle array]}
+const allTfAnalysis={}; // {tf: analysis result}
+const TF_WEIGHTS={"1min":1,"5min":1.5,"15min":2,"30min":2.5,"1h":3,"4h":4};
 
 // ===== DOM =====
 const $=id=>document.getElementById(id);
@@ -299,7 +330,8 @@ function connectSSE(){
           if(livePrice>last.h)last.h=livePrice;
           if(livePrice<last.l)last.l=livePrice;
           prediction=analyze(candles);
-          renderPrediction();renderChart();renderSignals();renderLevels();
+          allTfAnalysis[currentTF]=prediction;
+          renderPrediction();renderChart();renderSignals();renderLevels();renderMTF();
         }
       }
       if(msg.type==="quote"&&msg.data){
@@ -307,8 +339,15 @@ function connectSSE(){
         if(msg.data.low)$("sLow").textContent=(+msg.data.low).toFixed(5);
         if(msg.data.open)$("sOpen").textContent=(+msg.data.open).toFixed(5);
       }
-      if(msg.type==="candles"&&msg.data.values&&msg.interval===currentTF){
-        processCandles(msg.data);updateTimestamp();
+      if(msg.type==="candles"&&msg.data.values){
+        const tf=msg.interval;
+        const parsed=msg.data.values.reverse().map(v=>({o:+v.open,h:+v.high,l:+v.low,c:+v.close,t:v.datetime}));
+        allTfCandles[tf]=parsed;
+        allTfAnalysis[tf]=analyze(parsed);
+        if(tf===currentTF){
+          processCandles(msg.data);updateTimestamp();
+        }
+        renderMTF();
       }
     }catch(err){}
   };
@@ -390,6 +429,90 @@ function renderLevels(){
   if(!prediction||!prediction.levels.length){$("tab-levels").innerHTML='<div class="empty">Aucun niveau détecté</div>';return}
   const price=candles[candles.length-1]?.c||livePrice;
   $("tab-levels").innerHTML=prediction.levels.map(lv=>`<div class="lvl-row"><span style="font-family:var(--mono);font-size:9px;font-weight:600;color:${lv.t==="S"?"var(--green)":"var(--red)"};">${lv.t==="S"?"SUPPORT":"RÉSIST."}</span><span style="font-family:var(--mono);font-size:11px;color:#ede6d8">${lv.p.toFixed(5)}</span><span style="font-family:var(--mono);font-size:10px;color:var(--dim)">${lv.n}x</span><span style="font-family:var(--mono);font-size:10px;color:var(--dimmer)">${((lv.p-price)/price*100).toFixed(3)}%</span></div>`).join("")}
+
+// ===== MULTI-TF CONSENSUS =====
+function renderMTF(){
+  const grid=$("mtfGrid");
+  const tfOrder=["1min","5min","15min","30min","1h","4h"];
+  const tfLabels={"1min":"1M","5min":"5M","15min":"15M","30min":"30M","1h":"1H","4h":"4H"};
+  const dirColors={HAUSSE:"#26a69a",BAISSE:"#ef5350",NEUTRE:"var(--gold)"};
+  const dirIcons={HAUSSE:"↑",BAISSE:"↓",NEUTRE:"—"};
+  const dirLabels={HAUSSE:"ACHAT",BAISSE:"VENTE",NEUTRE:"NEUTRE"};
+
+  let rows='<div class="mtf-row mtf-row-header"><span>TF</span><span>SIGNAL</span><span>CONF</span><span>RSI</span><span>MACD</span></div>';
+  let bullW=0,bearW=0,totalW=0,loaded=0;
+
+  for(const tf of tfOrder){
+    const a=allTfAnalysis[tf];
+    const w=TF_WEIGHTS[tf];
+    if(!a){
+      rows+=`<div class="mtf-row"><span class="tf-label">${tfLabels[tf]}</span><span class="mtf-loading">chargement...</span><span></span><span></span><span></span></div>`;
+      continue;
+    }
+    loaded++;
+    const color=dirColors[a.dir];
+    const icon=dirIcons[a.dir];
+    const label=dirLabels[a.dir];
+    // RSI value
+    const rsiSig=a.sigs.find(s=>s.n==="RSI");
+    const rsiVal=rsiSig?rsiSig.v:"—";
+    const rsiColor=rsiSig?(rsiSig.s==="BUY"?"#26a69a":rsiSig.s==="SELL"?"#ef5350":"var(--dim)"):"var(--dim)";
+    // MACD value
+    const macdSig=a.sigs.find(s=>s.n==="MACD");
+    const macdVal=macdSig?macdSig.v:"—";
+    const macdColor=macdSig?(macdSig.s==="BUY"?"#26a69a":macdSig.s==="SELL"?"#ef5350":"var(--dim)"):"var(--dim)";
+
+    rows+=`<div class="mtf-row"><span class="tf-label">${tfLabels[tf]}</span><span class="sig-dir" style="color:${color}">${icon} ${label}</span><span style="color:${color}">${a.conf}%</span><span style="color:${rsiColor}">${rsiVal}</span><span style="color:${macdColor}">${macdVal}</span></div>`;
+
+    if(a.dir==="HAUSSE")bullW+=w*a.conf;
+    else if(a.dir==="BAISSE")bearW+=w*a.conf;
+    totalW+=w*100;
+  }
+
+  grid.innerHTML=rows;
+
+  // Verdict
+  const verdict=$("mtfVerdict");
+  const summary=$("mtfSummary");
+
+  if(loaded<2){
+    verdict.textContent="EN ATTENTE...";verdict.style.color="var(--dim)";verdict.style.background="rgba(255,255,255,.03)";
+    summary.innerHTML="Les timeframes se chargent progressivement en arrière-plan.";
+    return;
+  }
+
+  const bullPct=totalW>0?(bullW/totalW*100):50;
+  const bearPct=totalW>0?(bearW/totalW*100):50;
+  const alignment=Math.abs(bullPct-bearPct);
+
+  // Count how many TFs agree
+  const bullCount=tfOrder.filter(tf=>allTfAnalysis[tf]&&allTfAnalysis[tf].dir==="HAUSSE").length;
+  const bearCount=tfOrder.filter(tf=>allTfAnalysis[tf]&&allTfAnalysis[tf].dir==="BAISSE").length;
+  const maxAgree=Math.max(bullCount,bearCount);
+
+  let sureLevel,sureText,sureColor,sureBg;
+
+  if(maxAgree>=5&&alignment>25){
+    sureLevel=3;sureText=bullPct>bearPct?"ACHAT FORT":"VENTE FORTE";
+    sureColor=bullPct>bearPct?"#26a69a":"#ef5350";
+    sureBg=bullPct>bearPct?"rgba(38,166,154,.12)":"rgba(239,83,80,.12)";
+  }else if(maxAgree>=4&&alignment>15){
+    sureLevel=2;sureText=bullPct>bearPct?"ACHAT PROBABLE":"VENTE PROBABLE";
+    sureColor=bullPct>bearPct?"#26a69a":"#ef5350";
+    sureBg=bullPct>bearPct?"rgba(38,166,154,.08)":"rgba(239,83,80,.08)";
+  }else if(maxAgree>=3&&alignment>10){
+    sureLevel=1;sureText=bullPct>bearPct?"TENDANCE HAUSSE":"TENDANCE BAISSE";
+    sureColor=bullPct>bearPct?"#26a69a":"#ef5350";
+    sureBg=bullPct>bearPct?"rgba(38,166,154,.05)":"rgba(239,83,80,.05)";
+  }else{
+    sureLevel=0;sureText="INCERTAIN";sureColor="var(--gold)";sureBg="rgba(212,180,120,.06)";
+  }
+
+  verdict.textContent=sureText;verdict.style.color=sureColor;verdict.style.background=sureBg;
+
+  const sureStars="●".repeat(sureLevel)+"○".repeat(3-sureLevel);
+  summary.innerHTML=`<div style="display:flex;justify-content:space-between;align-items:center"><div>Fiabilité : <span class="mtf-sure" style="color:${sureColor}">${sureStars}</span> <span style="color:${sureColor}">${sureLevel}/3</span></div><div>${loaded}/6 TF chargés</div></div><div style="margin-top:6px;color:var(--dimmer)">${bullCount} TF haussiers, ${bearCount} TF baissiers${maxAgree>=4?" — signal aligné":" — signaux contradictoires"}</div>`;
+}
 
 function renderHistory(){
   const colors={HAUSSE:{c:"var(--green)",l:"HAUSSIER",i:"↑"},BAISSE:{c:"var(--red)",l:"BAISSIER",i:"↓"},NEUTRE:{c:"var(--gold)",l:"NEUTRE",i:"—"}};
